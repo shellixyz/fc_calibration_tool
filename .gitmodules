@@ -1,0 +1,9 @@
+[submodule "lib/mavlink-ruby"]
+	path = lib/mavlink-ruby
+	url = https://github.com/shellixyz/mavlink-ruby
+[submodule "lib/msp-ruby"]
+	path = lib/msp-ruby
+	url = https://github.com/shellixyz/msp-ruby
+[submodule "lib/libutil"]
+	path = lib/libutil
+	url = https://github.com/shellixyz/ruby-libutil

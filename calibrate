@@ -1,0 +1,165 @@
+#!/usr/bin/env ruby
+
+require 'optparse'
+require_relative 'lib/fc_software_interface'
+require_relative 'lib/current_calibrator'
+require_relative 'lib/voltage_calibrator'
+require_relative 'lib/libutil/lib/term'
+
+class XOptionParser < OptionParser
+
+    def initialize
+        super
+        self.banner = "Usage: #$0 [options] serial_device"
+        on('-t value', '--acquisition-time=value', 'set sampling time in seconds') { |value| @acquisition_time = value }
+        on('-v', '--voltage', 'calibrate only voltage') { @calibration_targets << :voltage }
+        on('-c', '--current', 'calibrate only current') { @calibration_targets << :current }
+        on('-b', '--baud=VALUE', 'baud rate to use to communicate with FC, default is 115200') { |value| @baud = value }
+        on('-d', '--debug') { @debug = true }
+        on('-i', '--inav', 'Do not use autodetection, force INAV FC interface') { @fc_software = :inav }
+        on('-a', '--ardupilot', 'Do not use autodetection, force Ardupilot FC interface') { @fc_software = :ardupilot }
+        on('-d', '--display', 'Display currently measured voltage and current') { @display = true }
+    end
+
+    def print_usage
+        STDERR.puts self
+        exit 1
+    end
+
+    def set_defaults
+        @degug = false
+        @display = false
+        @baud = 115200
+        @acquisition_time = 5 # seconds
+        @calibration_targets = Array.new
+        @calibration_default_targets = %i{ voltage current }
+    end
+
+    def validate!
+        raise ArgumentError, 'too few arguments' if ARGV.count < 1
+        raise ArgumentError, 'too many arguments' if ARGV.count > 1
+        @acquisition_time = Integer @acquisition_time rescue raise ArgumentError, "invalid acquisition time, expected integer: #{acquisition_time}" if acquisition_time
+        @baud = Integer @baud rescue raise ArgumentError, "invalid acquisition time, expected integer: #{baud}" unless baud.is_a? Integer
+        @calibration_targets = @calibration_default_targets if @calibration_targets.empty?
+    end
+
+    def calibrate_current?
+        @calibration_targets.include? :current
+    end
+
+    def calibrate_voltage?
+        @calibration_targets.include? :voltage
+    end
+
+    def parse!
+        set_defaults
+        super
+        validate!
+        @serial_device = ARGV[0]
+        self
+    rescue ArgumentError => error
+        STDERR.puts "Error: #{error}\n\n"
+        print_usage
+    end
+
+    %i[ debug display ].each do |name|
+        define_method "#{name}?" do
+            instance_variable_get "@#{name}"
+        end
+    end
+
+    attr_reader :serial_device, :acquisition_time, :baud, :fc_software
+
+end
+
+begin
+
+    options = XOptionParser.new.parse!
+
+    #fc_software_interface = FCSoftwareInterface.autodetect options.serial_device, options.baud
+    #fc_software_interface = INavInterface.new options.serial_device, options.baud
+    #fc_software_interface = ArdupilotInterface.new options.serial_device, options.baud
+
+    fc_software_interface =
+        case options.fc_software
+        when :inav, :ardupilot
+          (options.fc_software == :inav ? INavInterface : ArdupilotInterface).method :new
+        else
+            FCSoftwareInterface.method :autodetect
+        end.call options.serial_device, options.baud
+
+    if options.display?
+        STDOUT.one_line_progress keep_line: false do
+            begin
+                sample_chars = [ ?-, ?\\, ?|, ?/ ]
+                sample_char_index = 0
+                loop do
+                    sample = fc_software_interface.sample_voltage_and_current
+                    STDOUT.update_line "%s %6.3f V - %6.3f A\r" % [ sample_chars[sample_char_index], sample.voltage, sample.current ]
+                    sample_char_index = (sample_char_index < sample_chars.count - 1) ? sample_char_index + 1 : 0
+                    sleep 0.2
+                end
+            rescue Interrupt
+                print "\r"
+                STDOUT.clear_line
+                exit 0
+            end
+        end
+    end
+
+    if options.calibrate_current?
+        raise "No current sensor present on the board" unless fc_software_interface.current_sensor_present?
+        unless fc_software_interface.current_sensor_enabled?
+            if Term.ask_yes_no "The current sensor is not enabled. Enable ? [y] ", true
+                STDERR.puts "Enabling current sensor"
+                fc_software_interface.enable_current_sensor
+            else
+                STDERR.puts "Voltage calibration skipped"
+            end
+            STDERR.puts
+        end
+    end
+
+    if options.calibrate_voltage?
+        raise "No voltage sensor present on the board" unless fc_software_interface.voltage_sensor_present?
+        unless fc_software_interface.voltage_sensor_enabled?
+            if Term.ask_yes_no "The voltage sensor is not enabled. Enable ? [y] ", true
+                STDERR.puts "Enabling voltage sensor"
+                fc_software_interface.enable_voltage_sensor
+            else
+                STDERR.puts "Voltage calibration skipped"
+            end
+            STDERR.puts
+        end
+    end
+
+    if fc_software_interface.needs_reboot?
+        if Term.ask_yes_no "FC configuration modified. Save & reboot ? [y] ", true
+            fc_software_interface.save_settings
+            STDERR.write 'Rebooting FC...'
+            fc_software_interface.reboot_fc
+            STDERR.puts
+        end
+        STDERR.puts
+    end
+
+    if options.calibrate_voltage? and fc_software_interface.voltage_sensor_enabled?
+        VoltageCalibrator.new(fc_software_interface, acquisition_time: options.acquisition_time).run
+    end
+
+    if options.calibrate_current? and fc_software_interface.current_sensor_enabled?
+        puts if options.calibrate_voltage? and fc_software_interface.voltage_sensor_enabled?
+        CurrentCalibrator.new(fc_software_interface, acquisition_time: options.acquisition_time).run
+    end
+
+rescue Interrupt
+    STDERR.puts "User interrupt"
+    exit 1
+rescue FCSoftwareInterface::Error::FirmwareAutodetectionFailed, CurrentCalibrator::InvalidResults, Errno::EIO, OptionParser::MissingArgument, OptionParser::InvalidOption, Errno::EBUSY  => error
+    if options.debug?
+        raise
+    else
+        STDERR.puts "Error: #{error}"
+        exit 2
+    end
+end
