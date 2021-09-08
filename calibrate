@@ -114,7 +114,7 @@ begin
                 STDERR.puts "Enabling current sensor"
                 fc_software_interface.enable_current_sensor
             else
-                STDERR.puts "Voltage calibration skipped"
+                STDERR.puts "Current calibration skipped"
             end
             STDERR.puts
         end
