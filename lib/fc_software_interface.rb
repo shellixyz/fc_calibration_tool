@@ -30,31 +30,6 @@ class FCSoftwareInterface
         end
     end
 
-    def self.autodetect_old serial_device, baud = 115200
-        begin
-            msp = MSP.new serial_device, baud
-            firmware = msp.command :fc_variant
-            #self.unsupported_firmware firmware if firmware != 'INAV'
-            #msp.close
-            #return :inav
-            return INavInterface.new msp
-        rescue MSP::ProtoError::ReadTimeout, MSP::ProtoError::SyncFailed
-        end
-
-        begin
-            mavlink = Mavlink.new serial_device, baud
-            #mavlink.wait_timeout = 5
-            mavlink.set_message_interval :SYS_STATUS, 0.02
-            mavlink.wait_for_message :SYS_STATUS
-            #mavlink.wait_timeout = nil
-            #mavlink.close
-            return ArdupilotInterface.new mavlink
-        rescue Mavlink::Error::Timeout
-        end
-
-        raise Error::FirmwareAutodetectionFailed, 'firmware auto-detection failed'
-    end
-
     def self.autodetect serial_device, baud = 115200
         begin
             msp = MSP.new serial_device, baud
@@ -68,9 +43,6 @@ class FCSoftwareInterface
                 end
                 raise
             end
-            #self.unsupported_firmware firmware if firmware != 'INAV'
-            #msp.close
-            #return :inav
             if firmware == 'ARDU'
                 msp.reboot_fc resume: false
                 sleep 1
@@ -82,11 +54,8 @@ class FCSoftwareInterface
 
         begin
             mavlink = Mavlink.new serial_device, baud
-            #mavlink.wait_timeout = 5
             mavlink.set_message_interval :SYS_STATUS, 0.02
             mavlink.wait_for_message :SYS_STATUS
-            #mavlink.wait_timeout = nil
-            #mavlink.close
             return ArdupilotInterface.new mavlink
         rescue Mavlink::Error::Timeout
         end
@@ -132,16 +101,7 @@ class ArdupilotInterface < FCSoftwareInterface
     def initialize serial_device, baud = 115200
         @mavlink = @proto_interface = serial_device.is_a?(Mavlink) ? serial_device : Mavlink.new(serial_device, baud)
         @sys_status_message_interval_configured = false
-        #mavlink.set_message_interval :SYS_STATUS, 0.02
-        #check_for_sensor_support
     end
-
-    #def check_for_sensor_support
-        #mavlink.wait_for_message :SYS_STATUS do |message|
-            #raise FCSI::Error::BatterySensorNotSupported unless message.content[:onboard_control_sensors_present].include? :MAV_SYS_STATUS_SENSOR_BATTERY
-            #raise FCSI::Error::BatterySensorNotEnabled unless message.content[:onboard_control_sensors_enabled].include? :MAV_SYS_STATUS_SENSOR_BATTERY
-        #end
-    #end
 
     def voltage_sensor_present?
         battery_sensor_present?
@@ -247,12 +207,6 @@ class ArdupilotInterface < FCSoftwareInterface
         @sys_status_message_interval_configured
     end
 
-    #def rescue_mavlink_error
-        #yield
-    #rescue => error
-        #raise Error::ProtocolError, error.to_s, caller[1..-1]
-    #end
-
     attr_reader :mavlink
 
 end
@@ -287,20 +241,17 @@ class INavInterface < FCSoftwareInterface
     end
 
     def current_sensor_enabled?
-        #features.include? :current_meter
         msp.feature_enabled? :current_meter
     end
 
     def enable_voltage_sensor
         msp.enable_feature :vbat
         @needs_reboot = true
-        #msp.command :set_feature, *(msp.command(:feature) + :vbat)
     end
 
     def enable_current_sensor
         msp.enable_feature :current_meter
         @needs_reboot = true
-        #msp.command :set_feature, *(msp.command(:feature) + :vbat)
     end
 
     def sample_voltage_and_current
@@ -335,7 +286,6 @@ class INavInterface < FCSoftwareInterface
     end
 
     def current_measurement_scale
-        #1/1000.0
         0.01
     end
 
@@ -344,15 +294,10 @@ class INavInterface < FCSoftwareInterface
     end
 
     def save_settings
-        #msp.command :eeprom_write
         msp.save_settings
     end
 
     private
-
-    #def features
-        #@features ||= msp.command :feature
-    #end
 
     attr_reader :msp
 

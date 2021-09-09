@@ -76,10 +76,6 @@ begin
 
     options = XOptionParser.new.parse!
 
-    #fc_software_interface = FCSoftwareInterface.autodetect options.serial_device, options.baud
-    #fc_software_interface = INavInterface.new options.serial_device, options.baud
-    #fc_software_interface = ArdupilotInterface.new options.serial_device, options.baud
-
     fc_software_interface =
         case options.fc_software
         when :inav, :ardupilot
