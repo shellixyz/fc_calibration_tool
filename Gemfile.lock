@@ -1,0 +1,19 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    crc (0.4.2)
+    nokogiri (1.12.4-x86_64-linux)
+      racc (~> 1.4)
+    racc (1.5.2)
+    shellixyz-serialport (1.3.2)
+
+PLATFORMS
+  x86_64-linux
+
+DEPENDENCIES
+  crc
+  nokogiri
+  shellixyz-serialport
+
+BUNDLED WITH
+   2.2.3
