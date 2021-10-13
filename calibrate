@@ -39,7 +39,7 @@ class XOptionParser < OptionParser
         raise ArgumentError, 'too few arguments' if ARGV.count < 1
         raise ArgumentError, 'too many arguments' if ARGV.count > 1
         @acquisition_time = Integer @acquisition_time rescue raise ArgumentError, "invalid acquisition time, expected integer: #{acquisition_time}" if acquisition_time
-        @baud = Integer @baud rescue raise ArgumentError, "invalid acquisition time, expected integer: #{baud}" unless baud.is_a? Integer
+        @baud = Integer @baud rescue raise ArgumentError, "invalid baud rate, expected integer: #{baud}" unless baud.is_a? Integer
         @calibration_targets = @calibration_default_targets if @calibration_targets.empty?
     end
 
