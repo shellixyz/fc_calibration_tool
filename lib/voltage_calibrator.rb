@@ -1,14 +1,17 @@
 
 require 'forwardable'
+require_relative 'calibration_sample_stats'
 require_relative 'libutil/lib/term'
 
 class VoltageCalibrator
 
     DEFAULT_ACQUISITION_TIME = 5 # seconds
 
-    def initialize fc_software_interface, acquisition_time: DEFAULT_ACQUISITION_TIME
+    def initialize fc_software_interface, acquisition_time: DEFAULT_ACQUISITION_TIME, quality_thresholds: CalibrationSampleStats::DEFAULT_QUALITY_THRESHOLDS
         @acquisition_time = acquisition_time
+        @measurement_stats = nil
         @fc_software_interface = fc_software_interface
+        @quality_thresholds = quality_thresholds
     end
 
     def run
@@ -31,14 +34,26 @@ class VoltageCalibrator
 
     def calibration_data
         raise 'no data available' if scale.nil?
-        { voltage_scale: scale }
+        {
+            voltage_scale: scale,
+            measurement_stats: measurement_stats && {
+                count: measurement_stats.count,
+                mean: measurement_stats.mean,
+                standard_deviation: measurement_stats.standard_deviation,
+                minimum: measurement_stats.minimum,
+                maximum: measurement_stats.maximum,
+                span: measurement_stats.span,
+                quality_score: measurement_stats.quality_score,
+                quality_label: measurement_stats.quality_label(quality_thresholds)
+            }
+        }
     end
 
     extend Forwardable
     def_delegator :fc_software_interface, :voltage_measurement_scale, :measurement_scale
     def_delegators :fc_software_interface, :target_software
 
-    attr_reader :previous_scale, :fc_measure, :true_value, :scale
+    attr_reader :previous_scale, :fc_measure, :true_value, :scale, :measurement_stats
     attr_accessor :acquisition_time
 
     private
@@ -50,7 +65,8 @@ class VoltageCalibrator
 
     def gather_measurement
         Term.message_pause "Press enter to start the voltage measurement or press ctrl-c to abort the voltage calibration..."
-        @fc_measure = acquire
+        @fc_measure, @measurement_stats = acquire
+        display_measurement_quality measurement_stats, 'V'
         @true_value = Term.ask_for_float 'Enter the real voltage in volts > '
         puts
     rescue Interrupt
@@ -71,7 +87,12 @@ class VoltageCalibrator
             end
         end
         print "\a"
-        samples.sum / samples.count
+        stats = CalibrationSampleStats.from_samples samples
+        [ stats.mean, stats ]
+    end
+
+    def display_measurement_quality stats, unit
+        puts "Measurement quality: #{stats.quality_score.round}/100 (#{stats.quality_label(quality_thresholds)}) - min=#{stats.minimum.round(4)} #{unit}, max=#{stats.maximum.round(4)} #{unit}, sd=#{stats.standard_deviation.round(4)} #{unit}, span=#{stats.span.round(4)} #{unit}, samples=#{stats.count}"
     end
 
     def calculate_scale
@@ -80,6 +101,7 @@ class VoltageCalibrator
 
     def display_results
         puts "Adjusted voltage scale: #{scale.round(4)}"
+        puts "Measurement quality: #{measurement_stats.quality_score.round}/100" if measurement_stats
     end
 
     def save_calibration_onto_fc
@@ -96,5 +118,7 @@ class VoltageCalibrator
     end
 
     attr_reader :fc_software_interface, :fc_measure, :true_value
+
+    attr_reader :quality_thresholds
 
 end

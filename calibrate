@@ -19,6 +19,7 @@ class XOptionParser < OptionParser
         on('-b', '--baud=VALUE', 'baud rate to use to communicate with FC, default is 115200') { |value| @baud = value }
         on('-B', '--battery=BAT', 'battery slot to use on PX4 MAVLink FCs, for example BAT1 or BAT2') { |value| @battery = value }
         on('--csv=FILE', 'append calibration measurements and results to FILE in CSV format') { |value| @csv_path = value }
+        on('--quality-thresholds=EXCELLENT,GOOD,FAIR', 'set quality score thresholds, default is 90,75,50') { |value| @quality_thresholds = value }
         on('-d', '--debug') { @debug = true }
         on('-i', '--inav', 'Do not use autodetection, force INAV FC interface') { @fc_software = :inav }
         on('-a', '--ardupilot', 'Do not use autodetection, force Ardupilot FC interface') { @fc_software = :ardupilot }
@@ -37,6 +38,7 @@ class XOptionParser < OptionParser
         @display_all_batteries = false
         @baud = 115200
         @csv_path = nil
+        @quality_thresholds = CalibrationSampleStats::DEFAULT_QUALITY_THRESHOLDS
         @acquisition_time = 5 # seconds
         @calibration_targets = Array.new
         @calibration_default_targets = %i{ voltage current }
@@ -48,6 +50,7 @@ class XOptionParser < OptionParser
         @acquisition_time = Integer @acquisition_time rescue raise ArgumentError, "invalid acquisition time, expected integer: #{acquisition_time}" if acquisition_time
         @baud = Integer @baud rescue raise ArgumentError, "invalid baud rate, expected integer: #{baud}" unless baud.is_a? Integer
         @battery = parse_battery @battery if @battery
+        @quality_thresholds = parse_quality_thresholds @quality_thresholds if @quality_thresholds.is_a? String
         @calibration_targets = @calibration_default_targets if @calibration_targets.empty?
     end
 
@@ -76,7 +79,7 @@ class XOptionParser < OptionParser
         end
     end
 
-    attr_reader :serial_device, :acquisition_time, :baud, :battery, :fc_software, :csv_path
+    attr_reader :serial_device, :acquisition_time, :baud, :battery, :fc_software, :csv_path, :quality_thresholds
 
     private
 
@@ -85,6 +88,21 @@ class XOptionParser < OptionParser
         return normalized if normalized.match?(/\ABAT[1-9]\d*\z/)
 
         raise ArgumentError, "invalid battery selector, expected BAT1, BAT2, ...: #{value}"
+    end
+
+    def parse_quality_thresholds value
+        parts = value.to_s.split(',').map(&:strip)
+        raise ArgumentError, "invalid quality thresholds, expected EXCELLENT,GOOD,FAIR: #{value}" unless parts.count == 3
+
+        excellent, good, fair = parts.map { |part| Float(part) rescue nil }
+        raise ArgumentError, "invalid quality thresholds, expected numeric values: #{value}" if [excellent, good, fair].any?(&:nil?)
+        raise ArgumentError, "invalid quality thresholds, expected 100 >= excellent > good > fair >= 0: #{value}" unless excellent <= 100 && excellent > good && good > fair && fair >= 0
+
+        {
+            excellent: excellent,
+            good: good,
+            fair: fair
+        }
     end
 
 end
@@ -108,6 +126,14 @@ class CalibrationCsvWriter
         native_voltage_offset
         native_scale
         voltage_scale
+        sample_count
+        sample_mean
+        sample_standard_deviation
+        sample_minimum
+        sample_maximum
+        sample_span
+        sample_quality_score
+        sample_quality_label
     ].freeze
 
     def self.append path, calibrator, options
@@ -153,24 +179,45 @@ class CalibrationCsvWriter
         }
     end
 
+    def measurement_stats_for index
+        stats = data[:measurement_stats]
+        return nil if stats.nil?
+        return stats[index] if stats.is_a? Array
+
+        stats
+    end
+
+    def row_with_stats row, stats
+        row.merge(
+            'sample_count' => stats && stats[:count],
+            'sample_mean' => stats && stats[:mean],
+            'sample_standard_deviation' => stats && stats[:standard_deviation],
+            'sample_minimum' => stats && stats[:minimum],
+            'sample_maximum' => stats && stats[:maximum],
+            'sample_span' => stats && stats[:span],
+            'sample_quality_score' => stats && stats[:quality_score],
+            'sample_quality_label' => stats && stats[:quality_label]
+        )
+    end
+
     def rows
         if calibrator.is_a?(CurrentCalibrator)
             calibrator.fc_measurements.each_with_index.map do |fc_measurement, index|
-                base_row.merge(
+                row_with_stats(base_row.merge(
                     'calibration_type' => 'current',
                     'measurement_index' => index,
                     'fc_measurement' => fc_measurement,
                     'true_measurement' => calibrator.true_measurements[index]
-                )
+                ), measurement_stats_for(index))
             end
         else
             [
-                base_row.merge(
+                row_with_stats(base_row.merge(
                     'calibration_type' => 'voltage',
                     'measurement_index' => 0,
                     'fc_measurement' => calibrator.fc_measure,
                     'true_measurement' => calibrator.true_value
-                )
+                ), measurement_stats_for(0))
             ]
         end
     end
@@ -256,14 +303,14 @@ begin
     end
 
     if options.calibrate_voltage? and fc_software_interface.voltage_sensor_enabled?
-        voltage_calibrator = VoltageCalibrator.new(fc_software_interface, acquisition_time: options.acquisition_time)
+        voltage_calibrator = VoltageCalibrator.new(fc_software_interface, acquisition_time: options.acquisition_time, quality_thresholds: options.quality_thresholds)
         voltage_calibrator.run
         CalibrationCsvWriter.append options.csv_path, voltage_calibrator, options if options.csv_path
     end
 
     if options.calibrate_current? and fc_software_interface.current_sensor_enabled?
         puts if options.calibrate_voltage? and fc_software_interface.voltage_sensor_enabled?
-        current_calibrator = CurrentCalibrator.new(fc_software_interface, acquisition_time: options.acquisition_time)
+        current_calibrator = CurrentCalibrator.new(fc_software_interface, acquisition_time: options.acquisition_time, quality_thresholds: options.quality_thresholds)
         current_calibrator.run
         CalibrationCsvWriter.append options.csv_path, current_calibrator, options if options.csv_path
     end

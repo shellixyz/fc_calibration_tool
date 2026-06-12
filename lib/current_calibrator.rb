@@ -2,6 +2,7 @@
 require 'forwardable'
 require_relative 'libutil/lib/term'
 require_relative 'fc_software_interface'
+require_relative 'calibration_sample_stats'
 require_relative 'current_scale_and_offset_calculator'
 
 class CurrentCalibrator
@@ -12,11 +13,13 @@ class CurrentCalibrator
 
     DEFAULT_ACQUISITION_TIME = 5 # seconds
 
-    def initialize fc_software_interface, acquisition_time: DEFAULT_ACQUISITION_TIME
+    def initialize fc_software_interface, acquisition_time: DEFAULT_ACQUISITION_TIME, quality_thresholds: CalibrationSampleStats::DEFAULT_QUALITY_THRESHOLDS
         @acquisition_time = acquisition_time
         @fc_measurements = Array.new
+        @fc_measurement_stats = Array.new
         @true_measurements = Array.new
         @fc_software_interface = fc_software_interface
+        @quality_thresholds = quality_thresholds
     end
 
     def run
@@ -47,6 +50,19 @@ class CurrentCalibrator
         raise "no data available" if offset_and_scale_calculator.nil?
         data = %i{ offset scale voltage_offset native_voltage_offset native_scale }.map { |value_name| [ value_name, send(value_name) ] }.to_h
         data[:measurements] = true_measurements.zip(fc_measurements).to_h
+        data[:measurement_stats] = fc_measurement_stats.map do |stats|
+            {
+                count: stats.count,
+                mean: stats.mean,
+                standard_deviation: stats.standard_deviation,
+                minimum: stats.minimum,
+                maximum: stats.maximum,
+                span: stats.span,
+                quality_score: stats.quality_score,
+                quality_label: stats.quality_label(quality_thresholds)
+            }
+        end
+        data
     end
 
     extend Forwardable
@@ -54,7 +70,7 @@ class CurrentCalibrator
     def_delegators :fc_software_interface, :target_software
     def_delegator :fc_software_interface, :current_measurement_scale, :measurement_scale
 
-    attr_reader :fc_measurements, :true_measurements, :previous_offset, :previous_scale
+    attr_reader :fc_measurements, :fc_measurement_stats, :true_measurements, :previous_offset, :previous_scale
     attr_accessor :acquisition_time
 
     private
@@ -87,11 +103,13 @@ class CurrentCalibrator
             Term.message_pause "Start the load and press enter to start a current measurement or press ctrl-c to stop the measurements..."
 
             begin
-                fc_measure = acquire
+                fc_measure, stats = acquire
+                display_measurement_quality stats, 'A'
                 true_value = Term.ask_for_float 'Enter the real current in amperes > '
                 puts
 
                 fc_measurements << fc_measure
+                fc_measurement_stats << stats
                 true_measurements << true_value
             rescue AcquisitionAborted, Interrupt
                 puts
@@ -115,11 +133,15 @@ class CurrentCalibrator
             end
         end
         print "\a"
-        samples.sum / samples.count
-        #(samples.sum / samples.count).tap { |v| puts v.round(3) }
+        stats = CalibrationSampleStats.from_samples samples
+        [ stats.mean, stats ]
     rescue Interrupt
         STDERR.print "Acquisition aborted by user request\n\n"
         raise AcquisitionAborted
+    end
+
+    def display_measurement_quality stats, unit
+        puts "Measurement quality: #{stats.quality_score.round}/100 (#{stats.quality_label(quality_thresholds)}) - min=#{stats.minimum.round(4)} #{unit}, max=#{stats.maximum.round(4)} #{unit}, sd=#{stats.standard_deviation.round(4)} #{unit}, span=#{stats.span.round(4)} #{unit}, samples=#{stats.count}"
     end
 
     def calculate_offset_and_scale
@@ -140,6 +162,10 @@ class CurrentCalibrator
         puts "Offset: #{calc.offset.round 4} #{calc.offset_unit}"
         puts "Offset voltage: #{calc.voltage_offset.round 4} V#{" (#{target_software} offset value: #{calc.native_voltage_offset.round})" if target_software == :inav}"
         puts "Scale: #{calc.scale.round 4} #{calc.scale_unit}#{" (#{target_software} scale value: #{calc.native_scale.round})" if target_software == :inav}"
+        if fc_measurement_stats.any?
+            average_score = fc_measurement_stats.sum(&:quality_score) / fc_measurement_stats.count.to_f
+            puts "Average measurement quality: #{average_score.round}/100"
+        end
     end
 
     def save_calibration_onto_fc
@@ -157,5 +183,7 @@ class CurrentCalibrator
 
     attr_reader :fc_software_interface, :offset_and_scale_calculator
     alias calc offset_and_scale_calculator
+
+    attr_reader :quality_thresholds
 
 end
