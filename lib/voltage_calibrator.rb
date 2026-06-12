@@ -92,7 +92,7 @@ class VoltageCalibrator
     end
 
     def display_measurement_quality stats, unit
-        puts "Measurement quality: #{stats.quality_score.round}/100 (#{stats.quality_label(quality_thresholds)}) - min=#{stats.minimum.round(4)} #{unit}, max=#{stats.maximum.round(4)} #{unit}, sd=#{stats.standard_deviation.round(4)} #{unit}, span=#{stats.span.round(4)} #{unit}, samples=#{stats.count}"
+        puts "Measurement quality: #{stats.quality_score.round}/100 (#{stats.quality_label(quality_thresholds)}) - avg=#{stats.mean.round(4)} #{unit}, min=#{stats.minimum.round(4)} #{unit}, max=#{stats.maximum.round(4)} #{unit}, span=#{stats.span.round(4)} #{unit}, sd=#{stats.standard_deviation.round(4)} #{unit}, samples=#{stats.count}"
     end
 
     def calculate_scale
