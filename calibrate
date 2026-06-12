@@ -15,6 +15,7 @@ class XOptionParser < OptionParser
         on('-v', '--voltage', 'calibrate only voltage') { @calibration_targets << :voltage }
         on('-c', '--current', 'calibrate only current') { @calibration_targets << :current }
         on('-b', '--baud=VALUE', 'baud rate to use to communicate with FC, default is 115200') { |value| @baud = value }
+        on('-B', '--battery=BAT', 'battery slot to use on PX4 MAVLink FCs, for example BAT1 or BAT2') { |value| @battery = value }
         on('-d', '--debug') { @debug = true }
         on('-i', '--inav', 'Do not use autodetection, force INAV FC interface') { @fc_software = :inav }
         on('-a', '--ardupilot', 'Do not use autodetection, force Ardupilot FC interface') { @fc_software = :ardupilot }
@@ -40,6 +41,7 @@ class XOptionParser < OptionParser
         raise ArgumentError, 'too many arguments' if ARGV.count > 1
         @acquisition_time = Integer @acquisition_time rescue raise ArgumentError, "invalid acquisition time, expected integer: #{acquisition_time}" if acquisition_time
         @baud = Integer @baud rescue raise ArgumentError, "invalid baud rate, expected integer: #{baud}" unless baud.is_a? Integer
+        @battery = parse_battery @battery if @battery
         @calibration_targets = @calibration_default_targets if @calibration_targets.empty?
     end
 
@@ -68,7 +70,16 @@ class XOptionParser < OptionParser
         end
     end
 
-    attr_reader :serial_device, :acquisition_time, :baud, :fc_software
+    attr_reader :serial_device, :acquisition_time, :baud, :battery, :fc_software
+
+    private
+
+    def parse_battery value
+        normalized = value.to_s.strip.upcase
+        return normalized if normalized.match?(/\ABAT[1-9]\d*\z/)
+
+        raise ArgumentError, "invalid battery selector, expected BAT1, BAT2, ...: #{value}"
+    end
 
 end
 
@@ -82,7 +93,7 @@ begin
           (options.fc_software == :inav ? INavInterface : ArdupilotInterface).method :new
         else
             FCSoftwareInterface.method :autodetect
-        end.call options.serial_device, options.baud
+                end.call options.serial_device, options.baud, battery: options.battery
 
     if options.display?
         STDOUT.one_line_progress keep_line: false do

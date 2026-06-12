@@ -16,6 +16,12 @@ $ bundle install
 $ ./calibrate <your FC's port>
 ```
 
+On PX4 MAVLink targets you can select the battery slot to sample with `--battery`, for example:
+
+```
+$ ./calibrate -ad --battery=BAT1 /dev/ttyACM0
+```
+
 Keep in mind that you need to connect to the FC **without connecting power**, otherwise
 your measurements will be influenced and your calibrated values will be useless. You
 can easily do this with a piece of paper on the voltage pin of the USB cable (see a
