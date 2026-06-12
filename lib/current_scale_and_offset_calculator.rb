@@ -13,6 +13,7 @@ class CurrentScaleAndOffsetCalculator
         case software
         when :ardupilot then ArdupilotCurrentScaleAndOffsetCalculator
         when :inav then INavCurrentScaleAndOffsetCalculator
+        when :px4 then PX4CurrentScaleAndOffsetCalculator
         else raise ArgumentError, "unsupported software: #{software}"
         end
     end
@@ -114,6 +115,24 @@ class ArdupilotCurrentScaleAndOffsetCalculator < CurrentScaleAndOffsetCalculator
     alias native_scale_unit scale_unit
     alias native_voltage_offset voltage_offset
     alias native_voltage_offset_unit voltage_offset_unit
+
+end
+
+class PX4CurrentScaleAndOffsetCalculator < ArdupilotCurrentScaleAndOffsetCalculator
+
+    def offset
+        0
+    end
+
+    def offsets
+        @offsets ||= Array.new(meas.count, 0).extend NumericArray
+    end
+
+    def voltage_offset
+        0
+    end
+
+    alias native_voltage_offset voltage_offset
 
 end
 

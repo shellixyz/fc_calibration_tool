@@ -49,7 +49,7 @@ class FCSoftwareInterface
             else
                 return INavInterface.new msp, battery: battery
             end
-        rescue MSP::ProtoError::ReadTimeout, MSP::ProtoError::SyncFailed
+        rescue MSP::ProtoError
         end
 
         begin
@@ -94,8 +94,12 @@ FCSI = FCSoftwareInterface
 
 class ArdupilotInterface < FCSoftwareInterface
 
+    PX4_BATTERY_SOURCE_DISABLED = -1
+    PX4_BATTERY_SOURCE_POWER_MODULE = 0
+    PX4_ANALOG_CHANNEL_DISABLED = -2
+
     def target_software
-        :ardupilot
+        px4? ? :px4 : :ardupilot
     end
 
     def initialize serial_device, baud = 115200, battery: nil
@@ -107,22 +111,32 @@ class ArdupilotInterface < FCSoftwareInterface
     end
 
     def voltage_sensor_present?
+        return px4_voltage_sensor_present? if px4?
+
         battery_sensor_present?
     end
 
     def current_sensor_present?
+        return px4_current_sensor_present? if px4?
+
         battery_sensor_present?
     end
 
     def voltage_sensor_enabled?
+        return px4_voltage_sensor_enabled? if px4?
+
         [ 3, 4 ].include? mavlink.param_value(:BATT_MONITOR)
     end
 
     def current_sensor_enabled?
+        return px4_current_sensor_enabled? if px4?
+
         mavlink.param_value(:BATT_MONITOR) == 4
     end
 
     def enable_voltage_sensor
+        return enable_px4_voltage_sensor if px4?
+
         current_param_value = mavlink.param_value :BATT_MONITOR
         raise "The BATT_MONITOR param is not 0" unless current_param_value == 0
         mavlink.set_param_value :BATT_MONITOR, 3 unless current_param_value == 4
@@ -130,6 +144,8 @@ class ArdupilotInterface < FCSoftwareInterface
     end
 
     def enable_current_sensor
+        return enable_px4_current_sensor if px4?
+
         current_param_value = mavlink.param_value :BATT_MONITOR
         raise "The BATT_MONITOR param is different from 0 or 3" unless [0, 3].include? current_param_value
         mavlink.set_param_value :BATT_MONITOR, 4 unless current_param_value == 4
@@ -158,30 +174,42 @@ class ArdupilotInterface < FCSoftwareInterface
     end
 
     def voltage_scale
+        return px4_voltage_scale if px4?
+
         mavlink.param_value :BATT_VOLT_MULT
     end
 
     def set_voltage_scale scale
+        return set_px4_voltage_scale scale if px4?
+
         mavlink.set_param_value :BATT_VOLT_MULT, scale
     end
 
     def current_offset_and_scale
+        return px4_current_offset_and_scale if px4?
+
         offset = mavlink.param_value :BATT_AMP_OFFSET
         scale = mavlink.param_value :BATT_AMP_PERVLT
         FCSI::CurrentOffsetAndScale.new offset, scale
     end
 
     def set_current_offset_and_scale offset, scale
+        return set_px4_current_offset_and_scale offset, scale if px4?
+
         mavlink.set_param_value :BATT_AMP_OFFSET, offset
         mavlink.set_param_value :BATT_AMP_PERVLT, scale
         nil
     end
 
     def current_measurement_scale
+        return px4_current_measurement_scale if px4?
+
         100
     end
 
     def voltage_measurement_scale
+        return px4_voltage_measurement_scale if px4?
+
         20
     end
 
@@ -241,22 +269,107 @@ class ArdupilotInterface < FCSoftwareInterface
         @requested_px4_battery_slot ||= @battery_name.delete_prefix('BAT').to_i
     end
 
+    def px4_battery_slot
+        @battery_name ? requested_px4_battery_slot : 1
+    end
+
+    def px4_battery_param_name suffix, slot = px4_battery_slot
+        "BAT#{slot}_#{suffix}".intern
+    end
+
+    def px4_battery_param_value suffix, slot = px4_battery_slot
+        mavlink.param_value px4_battery_param_name(suffix, slot)
+    end
+
+    def px4_battery_source slot = px4_battery_slot
+        px4_battery_param_value 'SOURCE', slot
+    rescue Mavlink::FailedToGetParam
+        PX4_BATTERY_SOURCE_DISABLED
+    end
+
+    def px4_voltage_channel slot = px4_battery_slot
+        px4_battery_param_value 'V_CHANNEL', slot
+    end
+
+    def px4_current_channel slot = px4_battery_slot
+        px4_battery_param_value 'I_CHANNEL', slot
+    end
+
     def px4_bat_current_only? slot
-        mavlink.param_value("BAT#{slot}_V_CHANNEL".intern) == -1 && mavlink.param_value("BAT#{slot}_I_CHANNEL".intern) >= 0
+        px4_battery_source(slot) == PX4_BATTERY_SOURCE_POWER_MODULE && px4_voltage_channel(slot) == -1 && px4_current_channel(slot) >= 0
     rescue Mavlink::FailedToGetParam
         false
     end
 
     def px4_bat_voltage_only? slot
-        mavlink.param_value("BAT#{slot}_V_CHANNEL".intern) >= 0 && mavlink.param_value("BAT#{slot}_I_CHANNEL".intern) == -1
+        px4_battery_source(slot) == PX4_BATTERY_SOURCE_POWER_MODULE && px4_voltage_channel(slot) >= 0 && px4_current_channel(slot) == -1
     rescue Mavlink::FailedToGetParam
         false
     end
 
     def px4_bat_voltage_and_current? slot
-        mavlink.param_value("BAT#{slot}_V_CHANNEL".intern) >= 0 && mavlink.param_value("BAT#{slot}_I_CHANNEL".intern) >= 0
+        px4_battery_source(slot) == PX4_BATTERY_SOURCE_POWER_MODULE && px4_voltage_channel(slot) >= 0 && px4_current_channel(slot) >= 0
     rescue Mavlink::FailedToGetParam
         false
+    end
+
+    def px4_voltage_sensor_present?
+        px4_battery_source == PX4_BATTERY_SOURCE_POWER_MODULE
+    end
+
+    def px4_current_sensor_present?
+        px4_battery_source == PX4_BATTERY_SOURCE_POWER_MODULE
+    end
+
+    def px4_voltage_sensor_enabled?
+        px4_voltage_sensor_present? && px4_voltage_channel != PX4_ANALOG_CHANNEL_DISABLED
+    rescue Mavlink::FailedToGetParam
+        false
+    end
+
+    def px4_current_sensor_enabled?
+        px4_current_sensor_present? && px4_current_channel != PX4_ANALOG_CHANNEL_DISABLED
+    rescue Mavlink::FailedToGetParam
+        false
+    end
+
+    def enable_px4_voltage_sensor
+        mavlink.set_param_value px4_battery_param_name('SOURCE'), PX4_BATTERY_SOURCE_POWER_MODULE if px4_battery_source == PX4_BATTERY_SOURCE_DISABLED
+        raise Error::BatterySensorNotSupported, "PX4 #{px4_battery_param_name('V_CHANNEL')} is disabled; configure the ADC channel explicitly before calibrating voltage" if px4_voltage_channel == PX4_ANALOG_CHANNEL_DISABLED
+    end
+
+    def enable_px4_current_sensor
+        mavlink.set_param_value px4_battery_param_name('SOURCE'), PX4_BATTERY_SOURCE_POWER_MODULE if px4_battery_source == PX4_BATTERY_SOURCE_DISABLED
+        raise Error::BatterySensorNotSupported, "PX4 #{px4_battery_param_name('I_CHANNEL')} is disabled; configure the ADC channel explicitly before calibrating current" if px4_current_channel == PX4_ANALOG_CHANNEL_DISABLED
+    end
+
+    def px4_voltage_scale
+        px4_battery_param_value 'V_DIV'
+    end
+
+    def set_px4_voltage_scale scale
+        mavlink.set_param_value px4_battery_param_name('V_DIV'), scale
+    end
+
+    def px4_current_offset_and_scale
+        FCSI::CurrentOffsetAndScale.new 0.0, px4_battery_param_value('A_PER_V')
+    end
+
+    def set_px4_current_offset_and_scale offset, scale
+        mavlink.set_param_value px4_battery_param_name('A_PER_V'), scale
+        nil
+    end
+
+    def px4_current_measurement_scale
+        scale = px4_current_offset_and_scale.scale
+        if scale == -1
+            raise Error::BatterySensorNotSupported, "PX4 #{px4_battery_param_name('A_PER_V')} is using the board default; set an explicit current-per-volt value before running current calibration"
+        end
+        scale
+    end
+
+    def px4_voltage_measurement_scale
+        px4_voltage_scale
     end
 
     def select_px4_battery_id slot

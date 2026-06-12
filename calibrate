@@ -162,7 +162,13 @@ begin
 rescue Interrupt
     STDERR.puts "User interrupt"
     exit 1
-rescue FCSoftwareInterface::Error::FirmwareAutodetectionFailed, CurrentCalibrator::InvalidResults, Errno::EIO, OptionParser::MissingArgument, OptionParser::InvalidOption, Errno::EBUSY  => error
+rescue FCSoftwareInterface::Error::FirmwareAutodetectionFailed,
+       FCSoftwareInterface::Error::BatterySensorNotSupported,
+       CurrentCalibrator::InvalidResults,
+       Errno::EIO,
+       OptionParser::MissingArgument,
+       OptionParser::InvalidOption,
+       Errno::EBUSY => error
     if options.debug?
         raise
     else
