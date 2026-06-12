@@ -121,15 +121,15 @@ end
 class PX4CurrentScaleAndOffsetCalculator < ArdupilotCurrentScaleAndOffsetCalculator
 
     def offset
-        0
+        0.0
     end
 
     def offsets
-        @offsets ||= Array.new(meas.count, 0).extend NumericArray
+        @offsets ||= Array.new(meas.count, 0.0).extend NumericArray
     end
 
     def voltage_offset
-        0
+        0.0
     end
 
     alias native_voltage_offset voltage_offset

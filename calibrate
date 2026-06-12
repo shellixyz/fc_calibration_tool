@@ -1,6 +1,8 @@
 #!/usr/bin/env ruby
 
+require 'csv'
 require 'optparse'
+require 'time'
 require_relative 'lib/fc_software_interface'
 require_relative 'lib/current_calibrator'
 require_relative 'lib/voltage_calibrator'
@@ -16,10 +18,12 @@ class XOptionParser < OptionParser
         on('-c', '--current', 'calibrate only current') { @calibration_targets << :current }
         on('-b', '--baud=VALUE', 'baud rate to use to communicate with FC, default is 115200') { |value| @baud = value }
         on('-B', '--battery=BAT', 'battery slot to use on PX4 MAVLink FCs, for example BAT1 or BAT2') { |value| @battery = value }
+        on('--csv=FILE', 'append calibration measurements and results to FILE in CSV format') { |value| @csv_path = value }
         on('-d', '--debug') { @debug = true }
         on('-i', '--inav', 'Do not use autodetection, force INAV FC interface') { @fc_software = :inav }
         on('-a', '--ardupilot', 'Do not use autodetection, force Ardupilot FC interface') { @fc_software = :ardupilot }
         on('-d', '--display', 'Display currently measured voltage and current') { @display = true }
+        on('--display-all-batteries', 'Display all observed battery voltage/current values') { @display = @display_all_batteries = true }
     end
 
     def print_usage
@@ -30,7 +34,9 @@ class XOptionParser < OptionParser
     def set_defaults
         @degug = false
         @display = false
+        @display_all_batteries = false
         @baud = 115200
+        @csv_path = nil
         @acquisition_time = 5 # seconds
         @calibration_targets = Array.new
         @calibration_default_targets = %i{ voltage current }
@@ -64,13 +70,13 @@ class XOptionParser < OptionParser
         print_usage
     end
 
-    %i[ debug display ].each do |name|
+    %i[ debug display display_all_batteries ].each do |name|
         define_method "#{name}?" do
             instance_variable_get "@#{name}"
         end
     end
 
-    attr_reader :serial_device, :acquisition_time, :baud, :battery, :fc_software
+    attr_reader :serial_device, :acquisition_time, :baud, :battery, :fc_software, :csv_path
 
     private
 
@@ -79,6 +85,94 @@ class XOptionParser < OptionParser
         return normalized if normalized.match?(/\ABAT[1-9]\d*\z/)
 
         raise ArgumentError, "invalid battery selector, expected BAT1, BAT2, ...: #{value}"
+    end
+
+end
+
+class CalibrationCsvWriter
+
+    HEADERS = %w[
+        timestamp
+        serial_device
+        target_software
+        battery
+        calibration_type
+        measurement_index
+        fc_measurement
+        true_measurement
+        previous_offset
+        previous_scale
+        offset
+        scale
+        voltage_offset
+        native_voltage_offset
+        native_scale
+        voltage_scale
+    ].freeze
+
+    def self.append path, calibrator, options
+        data = calibrator.calibration_data
+        new(path, calibrator, options, data).append
+    rescue RuntimeError => error
+        raise unless error.message == 'no data available'
+    end
+
+    def initialize path, calibrator, options, data
+        @path = path
+        @calibrator = calibrator
+        @options = options
+        @data = data
+    end
+
+    def append
+        write_headers = !File.exist?(path) || File.zero?(path)
+
+        CSV.open(path, 'ab', write_headers: write_headers, headers: HEADERS) do |csv|
+            rows.each { |row| csv << HEADERS.map { |header| row[header] } }
+        end
+    end
+
+    private
+
+    attr_reader :path, :calibrator, :options, :data
+
+    def base_row
+        {
+            'timestamp' => Time.now.iso8601,
+            'serial_device' => options.serial_device,
+            'target_software' => calibrator.target_software,
+            'battery' => options.battery,
+            'previous_offset' => calibrator.respond_to?(:previous_offset) ? calibrator.previous_offset : nil,
+            'previous_scale' => calibrator.respond_to?(:previous_scale) ? calibrator.previous_scale : nil,
+            'offset' => data[:offset],
+            'scale' => data[:scale],
+            'voltage_offset' => data[:voltage_offset],
+            'native_voltage_offset' => data[:native_voltage_offset],
+            'native_scale' => data[:native_scale],
+            'voltage_scale' => data[:voltage_scale]
+        }
+    end
+
+    def rows
+        if calibrator.is_a?(CurrentCalibrator)
+            calibrator.fc_measurements.each_with_index.map do |fc_measurement, index|
+                base_row.merge(
+                    'calibration_type' => 'current',
+                    'measurement_index' => index,
+                    'fc_measurement' => fc_measurement,
+                    'true_measurement' => calibrator.true_measurements[index]
+                )
+            end
+        else
+            [
+                base_row.merge(
+                    'calibration_type' => 'voltage',
+                    'measurement_index' => 0,
+                    'fc_measurement' => calibrator.fc_measure,
+                    'true_measurement' => calibrator.true_value
+                )
+            ]
+        end
     end
 
 end
@@ -101,8 +195,19 @@ begin
                 sample_chars = [ ?-, ?\\, ?|, ?/ ]
                 sample_char_index = 0
                 loop do
-                    sample = fc_software_interface.sample_voltage_and_current
-                    STDOUT.update_line "%s %6.3f V - %6.3f A\r" % [ sample_chars[sample_char_index], sample.voltage, sample.current ]
+                    line =
+                        if options.display_all_batteries?
+                            samples = fc_software_interface.sample_voltage_and_currents
+                            sample_strings = samples.map do |sample|
+                                sample_label = sample.id.nil? ? 'default' : "id=#{sample.id}"
+                                "%s %6.3f V - %6.3f A" % [ sample_label, sample.voltage, sample.current ]
+                            end
+                            "%s %s\r" % [ sample_chars[sample_char_index], sample_strings.join(' | ') ]
+                        else
+                            sample = fc_software_interface.sample_voltage_and_current
+                            "%s %6.3f V - %6.3f A\r" % [ sample_chars[sample_char_index], sample.voltage, sample.current ]
+                        end
+                    STDOUT.update_line line
                     sample_char_index = (sample_char_index < sample_chars.count - 1) ? sample_char_index + 1 : 0
                     sleep 0.2
                 end
@@ -151,12 +256,16 @@ begin
     end
 
     if options.calibrate_voltage? and fc_software_interface.voltage_sensor_enabled?
-        VoltageCalibrator.new(fc_software_interface, acquisition_time: options.acquisition_time).run
+        voltage_calibrator = VoltageCalibrator.new(fc_software_interface, acquisition_time: options.acquisition_time)
+        voltage_calibrator.run
+        CalibrationCsvWriter.append options.csv_path, voltage_calibrator, options if options.csv_path
     end
 
     if options.calibrate_current? and fc_software_interface.current_sensor_enabled?
         puts if options.calibrate_voltage? and fc_software_interface.voltage_sensor_enabled?
-        CurrentCalibrator.new(fc_software_interface, acquisition_time: options.acquisition_time).run
+        current_calibrator = CurrentCalibrator.new(fc_software_interface, acquisition_time: options.acquisition_time)
+        current_calibrator.run
+        CalibrationCsvWriter.append options.csv_path, current_calibrator, options if options.csv_path
     end
 
 rescue Interrupt

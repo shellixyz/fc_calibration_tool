@@ -6,6 +6,7 @@ require_relative 'msp-ruby/msp'
 class FCSoftwareInterface
 
     VoltageAndCurrent = Struct.new :voltage, :current
+    BatterySample = Struct.new :id, :voltage, :current
     CurrentOffsetAndScale = Struct.new :offset, :scale
 
     module Error
@@ -69,6 +70,11 @@ class FCSoftwareInterface
 
     def sample_voltage
         sample_voltage_and_current.voltage
+    end
+
+    def sample_voltage_and_currents
+        sample = sample_voltage_and_current
+        [ BatterySample.new(nil, sample.voltage, sample.current) ]
     end
 
     def prepare_current_calibration
@@ -173,6 +179,12 @@ class ArdupilotInterface < FCSoftwareInterface
         end
     end
 
+    def sample_voltage_and_currents
+        return sample_px4_voltage_and_currents if px4?
+
+        super
+    end
+
     def voltage_scale
         return px4_voltage_scale if px4?
 
@@ -254,6 +266,16 @@ class ArdupilotInterface < FCSoftwareInterface
         FCSI::VoltageAndCurrent.new voltage, current
     end
 
+    def sample_px4_voltage_and_currents
+        configure_battery_status_message_interval
+
+        collect_px4_battery_samples
+            .sort_by { |sample| sample[:id] }
+            .map do |sample|
+                FCSI::BatterySample.new sample[:id], sample[:voltage_mv] / 1000.0, sample[:current_ca] / 100.0
+            end
+    end
+
     def px4_display_battery_id
         return @px4_display_battery_id if defined?(@px4_display_battery_id)
 
@@ -281,18 +303,27 @@ class ArdupilotInterface < FCSoftwareInterface
         mavlink.param_value px4_battery_param_name(suffix, slot)
     end
 
+    def px4_battery_characteristics slot = px4_battery_slot
+        @px4_battery_characteristics ||= {}
+        @px4_battery_characteristics[slot] ||= {
+            source: px4_battery_param_value('SOURCE', slot),
+            voltage_channel: px4_battery_param_value('V_CHANNEL', slot),
+            current_channel: px4_battery_param_value('I_CHANNEL', slot)
+        }
+    end
+
     def px4_battery_source slot = px4_battery_slot
-        px4_battery_param_value 'SOURCE', slot
+        px4_battery_characteristics(slot)[:source]
     rescue Mavlink::FailedToGetParam
         PX4_BATTERY_SOURCE_DISABLED
     end
 
     def px4_voltage_channel slot = px4_battery_slot
-        px4_battery_param_value 'V_CHANNEL', slot
+        px4_battery_characteristics(slot)[:voltage_channel]
     end
 
     def px4_current_channel slot = px4_battery_slot
-        px4_battery_param_value 'I_CHANNEL', slot
+        px4_battery_characteristics(slot)[:current_channel]
     end
 
     def px4_bat_current_only? slot
@@ -373,7 +404,7 @@ class ArdupilotInterface < FCSoftwareInterface
     end
 
     def select_px4_battery_id slot
-        samples = collect_px4_battery_samples
+        samples = preferred_px4_battery_samples
         return nil if samples.empty?
 
         selected =
@@ -402,11 +433,13 @@ class ArdupilotInterface < FCSoftwareInterface
                 voltage unless voltage == 65535
             end
             current_values = messages.map { |message| message[:current_battery] }
+            remaining_values = messages.map { |message| message[:battery_remaining] }.select { |remaining| (0..100).include? remaining }
 
             {
                 id: battery_id,
                 voltage_mv: voltage_values.empty? ? 65535 : voltage_values.sum / voltage_values.length.to_f,
-                current_ca: current_values.sum / current_values.length.to_f
+                current_ca: current_values.sum / current_values.length.to_f,
+                battery_remaining: remaining_values.empty? ? nil : remaining_values.sum / remaining_values.length.to_f
             }
         end
         .reject { |sample| sample[:voltage_mv] == 65535 }
@@ -415,7 +448,13 @@ class ArdupilotInterface < FCSoftwareInterface
     end
 
     def select_px4_current_only_battery_id
-        collect_px4_battery_samples.min_by { |sample| [sample[:current_ca].abs, sample[:voltage_mv]] }&.fetch(:id, nil)
+        preferred_px4_battery_samples.min_by { |sample| [sample[:current_ca].abs, sample[:voltage_mv]] }&.fetch(:id, nil)
+    end
+
+    def preferred_px4_battery_samples
+        samples = collect_px4_battery_samples
+        physical_samples = samples.select { |sample| not sample[:battery_remaining].nil? }
+        physical_samples.empty? ? samples : physical_samples
     end
 
     def battery_sensor_present?
