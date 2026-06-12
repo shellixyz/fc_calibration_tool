@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 
 require 'csv'
+require 'io/console'
 require 'optparse'
 require 'time'
 require_relative 'lib/fc_software_interface'
@@ -224,6 +225,110 @@ class CalibrationCsvWriter
 
 end
 
+class RunningSampleStats
+
+    def initialize
+        reset!
+    end
+
+    def add value
+        return if not value.finite?
+
+        @count += 1
+        delta = value - @mean
+        @mean += delta / @count.to_f
+        @sum_square_delta += delta * (value - @mean)
+        @minimum = @minimum.nil? ? value : [@minimum, value].min
+        @maximum = @maximum.nil? ? value : [@maximum, value].max
+        nil
+    end
+
+    def reset!
+        @count = 0
+        @mean = 0.0
+        @sum_square_delta = 0.0
+        @minimum = nil
+        @maximum = nil
+        nil
+    end
+
+    def to_stats
+        return nil if @count.zero?
+
+        variance = @sum_square_delta / @count.to_f
+        CalibrationSampleStats.new @count, @mean, Math.sqrt(variance), @minimum, @maximum
+    end
+
+end
+
+class DisplayMeasurementStats
+
+    def initialize quality_thresholds
+        @quality_thresholds = quality_thresholds
+        reset!
+    end
+
+    def add sample
+        voltage_stats.add sample.voltage
+        current_stats.add sample.current
+        nil
+    end
+
+    def reset!
+        @voltage_stats = RunningSampleStats.new
+        @current_stats = RunningSampleStats.new
+        nil
+    end
+
+    def format sample, label
+        "#{label} #{format_channel('V', sample.voltage, voltage_stats.to_stats)} #{format_channel('A', sample.current, current_stats.to_stats)}"
+    end
+
+    private
+
+    attr_reader :quality_thresholds, :voltage_stats, :current_stats
+
+    def format_channel channel, current_value, stats
+        if stats.nil?
+            "#{channel}=#{format_value(current_value)} avg=n/a min=n/a max=n/a span=n/a sd=n/a q=n/a"
+        else
+            "#{channel}=#{format_value(current_value)} avg=#{format_value(stats.mean)} min=#{format_value(stats.minimum)} max=#{format_value(stats.maximum)} span=#{format_value(stats.span)} sd=#{format_value(stats.standard_deviation)} q=#{stats.quality_score.round}/100/#{stats.quality_label(quality_thresholds)} n=#{stats.count}"
+        end
+    end
+
+    def format_value value
+        value.finite? ? format('%.4f', value) : 'nan'
+    end
+
+end
+
+class DisplayStatsController
+
+    def initialize quality_thresholds
+        @quality_thresholds = quality_thresholds
+        @stats_by_id = Hash.new { |hash, key| hash[key] = DisplayMeasurementStats.new quality_thresholds }
+    end
+
+    def add sample
+        stats_by_id[sample.id].add sample
+    end
+
+    def reset!
+        stats_by_id.each_value(&:reset!)
+        nil
+    end
+
+    def format sample
+        label = sample.id.nil? ? 'selected' : "id=#{sample.id}"
+        stats_by_id[sample.id].format sample, label
+    end
+
+    private
+
+    attr_reader :stats_by_id, :quality_thresholds
+
+end
+
 begin
 
     options = XOptionParser.new.parse!
@@ -237,22 +342,26 @@ begin
                 end.call options.serial_device, options.baud, battery: options.battery
 
     if options.display?
-        STDOUT.one_line_progress keep_line: false do
+        display_stats = DisplayStatsController.new options.quality_thresholds
+        display_loop = proc do
             begin
                 sample_chars = [ ?-, ?\\, ?|, ?/ ]
                 sample_char_index = 0
                 loop do
+                    display_stats.reset! if STDIN.tty? && display_reset_requested?
                     line =
                         if options.display_all_batteries?
                             samples = fc_software_interface.sample_voltage_and_currents
-                            sample_strings = samples.map do |sample|
-                                sample_label = sample.id.nil? ? 'default' : "id=#{sample.id}"
-                                "%s %6.3f V - %6.3f A" % [ sample_label, sample.voltage, sample.current ]
+                            sample_strings = samples.sort_by { |sample| sample.id || -1 }.map do |sample|
+                                display_stats.add sample
+                                display_stats.format sample
                             end
                             "%s %s\r" % [ sample_chars[sample_char_index], sample_strings.join(' | ') ]
                         else
                             sample = fc_software_interface.sample_voltage_and_current
-                            "%s %6.3f V - %6.3f A\r" % [ sample_chars[sample_char_index], sample.voltage, sample.current ]
+                            battery_sample = FCSoftwareInterface::BatterySample.new nil, sample.voltage, sample.current
+                            display_stats.add battery_sample
+                            "%s %s\r" % [ sample_chars[sample_char_index], display_stats.format(battery_sample) ]
                         end
                     STDOUT.update_line line
                     sample_char_index = (sample_char_index < sample_chars.count - 1) ? sample_char_index + 1 : 0
@@ -262,6 +371,14 @@ begin
                 print "\r"
                 STDOUT.clear_line
                 exit 0
+            end
+        end
+
+        STDOUT.one_line_progress title: 'Display mode: press space or enter to reset stats, ctrl-c to exit', keep_line: false do
+            if STDIN.tty?
+                STDIN.raw { display_loop.call }
+            else
+                display_loop.call
             end
         end
     end
@@ -331,4 +448,17 @@ rescue FCSoftwareInterface::Error::FirmwareAutodetectionFailed,
         STDERR.puts "Error: #{error}"
         exit 2
     end
+end
+
+def display_reset_requested?
+    reset_requested = false
+
+    while IO.select([STDIN], nil, nil, 0)
+        key = STDIN.read_nonblock(1, exception: false)
+        break if key == :wait_readable || key.nil?
+
+        reset_requested ||= [" ", "\r", "\n"].include? key
+    end
+
+    reset_requested
 end
