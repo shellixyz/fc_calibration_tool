@@ -24,6 +24,7 @@ class XOptionParser < OptionParser
         on('-d', '--debug') { @debug = true }
         on('-i', '--inav', 'Do not use autodetection, force INAV FC interface') { @fc_software = :inav }
         on('-a', '--ardupilot', 'Do not use autodetection, force Ardupilot FC interface') { @fc_software = :ardupilot }
+            on('-p', '--px4', 'Do not use autodetection, force PX4 MAVLink interface') { @fc_software = :ardupilot }
         on('-d', '--display', 'Display currently measured voltage and current') { @display = true }
         on('--display-all-batteries', 'Display all observed battery voltage/current values') { @display = @display_all_batteries = true }
     end
